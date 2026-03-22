@@ -2,11 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Chocolate Egg Hunt — Solo Mode</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Chocolate Egg Hunt — Mobile</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { width: 100%; height: 100%; overflow: hidden; background: #1a0a2e; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #1a0a2e; touch-action: none; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
   canvas { display: block; }
 </style>
 </head>
@@ -14,7 +15,7 @@
 <canvas id="game"></canvas>
 <script>
 // ============================================================
-// CHOCOLATE EGG HUNT — Solo Mode with AI Thief Bunnies
+// CHOCOLATE EGG HUNT — Mobile Version with Touch Controls
 // ============================================================
 
 const canvas = document.getElementById('game');
@@ -41,6 +42,11 @@ const EGG_RADIUS = 12;
 const ARENA_PADDING = 30;
 const SPAWN_INTERVAL_START = 1.5;
 const SPAWN_INTERVAL_END = 0.6;
+const CONTROL_ZONE_HEIGHT = 160; // reserved space at bottom for touch controls
+const IS_TOUCH = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+const JOYSTICK_RADIUS = 60;
+const JOYSTICK_THUMB_RADIUS = 22;
+const POOP_BTN_RADIUS = 35;
 
 // Egg types
 const EGG_TYPES = {
@@ -177,6 +183,99 @@ window.addEventListener('keydown', e => {
   }
 });
 window.addEventListener('keyup', e => { keys_pressed[e.code] = false; });
+
+// --- Touch Input System ---
+let touchJoystick = { active: false, id: null, cx: 0, cy: 0, dx: 0, dy: 0 };
+let touchPoopBtn = { active: false, id: null };
+let touchMoveX = 0, touchMoveY = 0;
+let touchPoopPressed = false;
+
+function getJoystickCenter() {
+  return { x: JOYSTICK_RADIUS + 40, y: canvas.height - CONTROL_ZONE_HEIGHT / 2 };
+}
+function getPoopBtnCenter() {
+  return { x: canvas.width - POOP_BTN_RADIUS - 40, y: canvas.height - CONTROL_ZONE_HEIGHT / 2 };
+}
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (gameState === 'START') { startGame(); return; }
+
+  for (const touch of e.changedTouches) {
+    const tx = touch.clientX;
+    const ty = touch.clientY;
+    const joy = getJoystickCenter();
+    const btn = getPoopBtnCenter();
+
+    // Check poop button first
+    if (Math.hypot(tx - btn.x, ty - btn.y) < POOP_BTN_RADIUS * 2) {
+      touchPoopBtn.active = true;
+      touchPoopBtn.id = touch.identifier;
+      touchPoopPressed = true;
+    }
+    // Check joystick zone (left half of screen)
+    else if (tx < canvas.width / 2) {
+      touchJoystick.active = true;
+      touchJoystick.id = touch.identifier;
+      touchJoystick.cx = tx;
+      touchJoystick.cy = ty;
+      touchJoystick.dx = 0;
+      touchJoystick.dy = 0;
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const touch of e.changedTouches) {
+    if (touchJoystick.active && touch.identifier === touchJoystick.id) {
+      const dx = touch.clientX - touchJoystick.cx;
+      const dy = touch.clientY - touchJoystick.cy;
+      const dist = Math.hypot(dx, dy);
+      const maxDist = JOYSTICK_RADIUS;
+      if (dist > maxDist) {
+        touchJoystick.dx = (dx / dist) * maxDist;
+        touchJoystick.dy = (dy / dist) * maxDist;
+      } else {
+        touchJoystick.dx = dx;
+        touchJoystick.dy = dy;
+      }
+      // Convert to -1..1 range
+      touchMoveX = touchJoystick.dx / maxDist;
+      touchMoveY = touchJoystick.dy / maxDist;
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  for (const touch of e.changedTouches) {
+    if (touchJoystick.active && touch.identifier === touchJoystick.id) {
+      touchJoystick.active = false;
+      touchJoystick.id = null;
+      touchMoveX = 0;
+      touchMoveY = 0;
+    }
+    if (touchPoopBtn.active && touch.identifier === touchPoopBtn.id) {
+      touchPoopBtn.active = false;
+      touchPoopBtn.id = null;
+    }
+  }
+
+  // Handle game over restart via touch
+  if (gameState === 'GAME_OVER') {
+    // Handled by the restart listener
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchcancel', e => {
+  touchJoystick.active = false;
+  touchJoystick.id = null;
+  touchMoveX = 0;
+  touchMoveY = 0;
+  touchPoopBtn.active = false;
+  touchPoopBtn.id = null;
+}, { passive: false });
 
 // --- Audio System ---
 let audioCtx = null;
@@ -340,12 +439,24 @@ class Player {
     }
 
     let mx = 0, my = 0;
+    // Keyboard input
     if (keys_pressed['ArrowLeft']) mx -= 1;
     if (keys_pressed['ArrowRight']) mx += 1;
     if (keys_pressed['ArrowUp']) my -= 1;
     if (keys_pressed['ArrowDown']) my += 1;
+    // Touch joystick input (overrides keyboard if active)
+    if (touchJoystick.active) {
+      mx = touchMoveX;
+      my = touchMoveY;
+      // Apply deadzone
+      const mag = Math.hypot(mx, my);
+      if (mag < 0.15) { mx = 0; my = 0; }
+    }
 
-    if (mx !== 0 && my !== 0) { mx *= 0.7071; my *= 0.7071; }
+    if (mx !== 0 && my !== 0) {
+      const mag = Math.hypot(mx, my);
+      if (mag > 1) { mx /= mag; my /= mag; }
+    }
     if (mx !== 0 || my !== 0) { this.facingX = mx; this.facingY = my; }
 
     let speed = BASE_SPEED;
@@ -354,9 +465,11 @@ class Player {
     this.vx = mx * speed;
     this.vy = my * speed;
 
-    // Poop input
-    if (keys_pressed['Space'] && this.poopsRemaining > 0 && this.poopCooldown <= 0) {
-      keys_pressed['Space'] = false; // consume the press
+    // Poop input (keyboard or touch)
+    const poopInput = keys_pressed['Space'] || touchPoopPressed;
+    if (poopInput && this.poopsRemaining > 0 && this.poopCooldown <= 0) {
+      keys_pressed['Space'] = false;
+      touchPoopPressed = false;
       poops.push(new Poop(this.x, this.y));
       this.poopsRemaining--;
       playSound('poop');
@@ -364,15 +477,17 @@ class Player {
         this.poopCooldown = POOP_COOLDOWN;
       }
     }
+    if (touchPoopPressed) touchPoopPressed = false; // consume even if couldn't poop
 
     this.x += this.vx * dt;
     this.y += this.vy * dt;
 
-    // Arena bounds
+    // Arena bounds (reserve bottom for touch controls on mobile)
     const minX = ARENA_PADDING + PLAYER_RADIUS;
     const maxX = canvas.width - ARENA_PADDING - PLAYER_RADIUS;
     const minY = ARENA_PADDING + PLAYER_RADIUS + 50;
-    const maxY = canvas.height - ARENA_PADDING - PLAYER_RADIUS;
+    const bottomReserve = IS_TOUCH ? CONTROL_ZONE_HEIGHT : 0;
+    const maxY = canvas.height - ARENA_PADDING - PLAYER_RADIUS - bottomReserve;
     if (this.x < minX) { this.x = minX; this.vx = 0; }
     if (this.x > maxX) { this.x = maxX; this.vx = 0; }
     if (this.y < minY) { this.y = minY; this.vy = 0; }
@@ -670,7 +785,8 @@ class AIBunny {
     const minX = ARENA_PADDING + AI_RADIUS;
     const maxX = canvas.width - ARENA_PADDING - AI_RADIUS;
     const minY = ARENA_PADDING + AI_RADIUS + 50;
-    const maxY = canvas.height - ARENA_PADDING - AI_RADIUS;
+    const bottomReserve = IS_TOUCH ? CONTROL_ZONE_HEIGHT : 0;
+    const maxY = canvas.height - ARENA_PADDING - AI_RADIUS - bottomReserve;
     if (this.x < minX) { this.x = minX; this.vx = 0; this.pickWanderDir(); }
     if (this.x > maxX) { this.x = maxX; this.vx = 0; this.pickWanderDir(); }
     if (this.y < minY) { this.y = minY; this.vy = 0; this.pickWanderDir(); }
@@ -912,8 +1028,9 @@ function getRandomEggType() {
 function spawnEgg() {
   const margin = ARENA_PADDING + EGG_RADIUS + 20;
   const topMargin = ARENA_PADDING + 50 + EGG_RADIUS + 20;
+  const bottomReserve = IS_TOUCH ? CONTROL_ZONE_HEIGHT : 0;
   const x = margin + Math.random() * (canvas.width - margin * 2);
-  const y = topMargin + Math.random() * (canvas.height - topMargin - margin);
+  const y = topMargin + Math.random() * (canvas.height - topMargin - margin - bottomReserve);
   eggs.push(new Egg(x, y, getRandomEggType()));
 }
 
@@ -1104,16 +1221,18 @@ function drawArena() {
 
   const ap = ARENA_PADDING;
   const top = ap + 50;
+  const bottomReserve = IS_TOUCH ? CONTROL_ZONE_HEIGHT : 0;
+  const arenaH = canvas.height - top - ap - bottomReserve;
   const borderRadius = 20;
   ctx.beginPath();
-  ctx.roundRect(ap, top, canvas.width - ap * 2, canvas.height - top - ap, borderRadius);
+  ctx.roundRect(ap, top, canvas.width - ap * 2, arenaH, borderRadius);
   ctx.fill();
 
   // Arena border
   ctx.strokeStyle = 'rgba(255,255,255,0.1)';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.roundRect(ap, top, canvas.width - ap * 2, canvas.height - top - ap, borderRadius);
+  ctx.roundRect(ap, top, canvas.width - ap * 2, arenaH, borderRadius);
   ctx.stroke();
 
   // Subtle grid pattern
@@ -1123,10 +1242,10 @@ function drawArena() {
   for (let x = ap + gridSize; x < canvas.width - ap; x += gridSize) {
     ctx.beginPath();
     ctx.moveTo(x, top);
-    ctx.lineTo(x, canvas.height - ap);
+    ctx.lineTo(x, top + arenaH);
     ctx.stroke();
   }
-  for (let y = top + gridSize; y < canvas.height - ap; y += gridSize) {
+  for (let y = top + gridSize; y < top + arenaH; y += gridSize) {
     ctx.beginPath();
     ctx.moveTo(ap, y);
     ctx.lineTo(canvas.width - ap, y);
@@ -1281,8 +1400,13 @@ function drawStartScreen(time) {
 
   ctx.font = '12px monospace';
   ctx.fillStyle = 'rgba(255,255,255,0.7)';
-  ctx.fillText('Arrow Keys to move', cx, cy + 10);
-  ctx.fillText('SPACE to drop bunny poops (slows thieves!)', cx, cy + 27);
+  if (IS_TOUCH) {
+    ctx.fillText('Joystick (left) to move', cx, cy + 10);
+    ctx.fillText('Poop button (right) slows thieves!', cx, cy + 27);
+  } else {
+    ctx.fillText('Arrow Keys to move', cx, cy + 10);
+    ctx.fillText('SPACE to drop bunny poops (slows thieves!)', cx, cy + 27);
+  }
 
   // Egg legend
   ctx.font = '11px monospace';
@@ -1338,7 +1462,7 @@ function drawStartScreen(time) {
   if (blink) {
     ctx.font = 'bold 18px monospace';
     ctx.fillStyle = '#FFD700';
-    ctx.fillText('Press any key to start!', cx, cy + 150);
+    ctx.fillText(IS_TOUCH ? 'Tap to start!' : 'Press any key to start!', cx, cy + 150);
   }
 
   // LMNO logo at bottom
@@ -1387,7 +1511,7 @@ function drawGameOverScreen(time) {
   if (blink) {
     ctx.font = 'bold 18px monospace';
     ctx.fillStyle = '#FFD700';
-    ctx.fillText('Press any key to play again!', cx, cy + 130);
+    ctx.fillText(IS_TOUCH ? 'Tap to play again!' : 'Press any key to play again!', cx, cy + 130);
   }
 }
 
@@ -1407,8 +1531,16 @@ function endGame() {
     const restartHandler = (e) => {
       startGame();
       window.removeEventListener('keydown', restartHandler);
+      canvas.removeEventListener('touchstart', touchRestartHandler);
+    };
+    const touchRestartHandler = (e) => {
+      e.preventDefault();
+      startGame();
+      window.removeEventListener('keydown', restartHandler);
+      canvas.removeEventListener('touchstart', touchRestartHandler);
     };
     window.addEventListener('keydown', restartHandler);
+    canvas.addEventListener('touchstart', touchRestartHandler, { passive: false });
   }, 1000);
 }
 
@@ -1419,6 +1551,107 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 resize();
+
+// --- Drawing: Touch Controls ---
+function drawTouchControls() {
+  if (!IS_TOUCH) return;
+
+  // Control zone background
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.fillRect(0, canvas.height - CONTROL_ZONE_HEIGHT, canvas.width, CONTROL_ZONE_HEIGHT);
+
+  // --- Virtual Joystick (left side) ---
+  const joy = getJoystickCenter();
+
+  // Outer ring
+  ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(joy.x, joy.y, JOYSTICK_RADIUS, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Inner thumb
+  let thumbX = joy.x;
+  let thumbY = joy.y;
+  let thumbAlpha = 0.2;
+  if (touchJoystick.active) {
+    thumbX = joy.x + touchJoystick.dx;
+    thumbY = joy.y + touchJoystick.dy;
+    // Re-center relative to actual touch position
+    thumbX = touchJoystick.cx + touchJoystick.dx;
+    thumbY = touchJoystick.cy + touchJoystick.dy;
+    thumbAlpha = 0.5;
+  }
+
+  ctx.fillStyle = `rgba(74, 144, 217, ${thumbAlpha})`;
+  ctx.beginPath();
+  ctx.arc(thumbX, thumbY, JOYSTICK_THUMB_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Direction arrows on joystick
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.font = '16px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  if (!touchJoystick.active) {
+    ctx.fillText('▲', joy.x, joy.y - JOYSTICK_RADIUS * 0.55);
+    ctx.fillText('▼', joy.x, joy.y + JOYSTICK_RADIUS * 0.55);
+    ctx.fillText('◀', joy.x - JOYSTICK_RADIUS * 0.55, joy.y);
+    ctx.fillText('▶', joy.x + JOYSTICK_RADIUS * 0.55, joy.y);
+  }
+
+  // --- Poop Button (right side) ---
+  const btn = getPoopBtnCenter();
+  const poopReady = player && player.poopsRemaining > 0 && player.poopCooldown <= 0;
+  const btnAlpha = touchPoopBtn.active ? 0.6 : (poopReady ? 0.35 : 0.15);
+
+  // Button circle
+  ctx.fillStyle = poopReady ? `rgba(109, 76, 65, ${btnAlpha})` : `rgba(80, 80, 80, ${btnAlpha})`;
+  ctx.beginPath();
+  ctx.arc(btn.x, btn.y, POOP_BTN_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = poopReady ? 'rgba(139, 105, 80, 0.5)' : 'rgba(100,100,100,0.3)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Poop icon (small poop pile)
+  ctx.fillStyle = poopReady ? '#8D6E63' : '#666';
+  ctx.beginPath();
+  ctx.ellipse(btn.x, btn.y + 4, 10, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(btn.x, btn.y - 3, 7, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(btn.x, btn.y - 9, 4, 3.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Count
+  if (player) {
+    ctx.font = 'bold 12px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    if (poopReady) {
+      ctx.fillStyle = '#fff';
+      ctx.fillText(`${player.poopsRemaining}`, btn.x, btn.y + POOP_BTN_RADIUS + 14);
+    } else if (player.poopCooldown > 0) {
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      const secs = Math.ceil(player.poopCooldown);
+      ctx.fillText(`${secs}s`, btn.x, btn.y + POOP_BTN_RADIUS + 14);
+
+      // Cooldown arc
+      const pct = 1 - (player.poopCooldown / POOP_COOLDOWN);
+      ctx.strokeStyle = '#8D6E63';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(btn.x, btn.y, POOP_BTN_RADIUS + 3, -Math.PI / 2, -Math.PI / 2 + pct * Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+}
 
 // --- Main Loop ---
 createObjects();
@@ -1497,6 +1730,9 @@ function gameLoop(timestamp) {
     if (gameState === 'GAME_OVER') {
       drawGameOverScreen(time);
     }
+
+    // Touch controls always on top during gameplay
+    drawTouchControls();
   }
 
   ctx.restore();
