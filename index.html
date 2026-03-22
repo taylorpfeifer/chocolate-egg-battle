@@ -2,27 +2,49 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Chocolate Egg Battle</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Chocolate Egg Battle — LMNO</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { width: 100%; height: 100%; overflow: hidden; background: #1a0a2e; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #1a0a2e; touch-action: none; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
   canvas { display: block; }
+  /* Mobile touch controls */
+  #touch-controls { display: none; position: fixed; bottom: 0; left: 0; right: 0; pointer-events: none; z-index: 10; }
+  .touch-zone { pointer-events: auto; position: absolute; }
+  #joystick-zone { left: 10px; bottom: 10px; width: 160px; height: 160px; }
+  #btn-poop { right: 20px; bottom: 80px; width: 80px; height: 80px; border-radius: 50%; background: rgba(139,90,43,0.5); border: 3px solid rgba(139,90,43,0.8); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 28px; font-family: monospace; font-weight: bold; }
+  #btn-dash { right: 110px; bottom: 30px; width: 70px; height: 70px; border-radius: 50%; background: rgba(74,144,217,0.5); border: 3px solid rgba(74,144,217,0.8); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 11px; font-family: monospace; font-weight: bold; text-align: center; }
+  .touch-active { transform: scale(0.9); opacity: 0.7; }
+  #joystick-base { width: 120px; height: 120px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); position: absolute; left: 20px; bottom: 20px; }
+  #joystick-stick { width: 50px; height: 50px; border-radius: 50%; background: rgba(255,255,255,0.35); border: 2px solid rgba(255,255,255,0.5); position: absolute; left: 55px; bottom: 55px; transform: translate(-50%, 50%); transition: none; }
 </style>
 </head>
 <body>
 <canvas id="game"></canvas>
+<div id="touch-controls">
+  <div id="joystick-zone" class="touch-zone">
+    <div id="joystick-base">
+      <div id="joystick-stick"></div>
+    </div>
+  </div>
+  <div id="btn-poop" class="touch-zone">💩</div>
+  <div id="btn-dash" class="touch-zone">DASH</div>
+</div>
 <script>
 // ============================================================
-// CHOCOLATE EGG BATTLE — 2-Player Local Multiplayer
+// CHOCOLATE EGG BATTLE — 1-Player vs AI Bunnies (LMNO Edition)
 // ============================================================
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 
+// --- Detect mobile ---
+const isMobile = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || ('ontouchstart' in window && window.innerWidth < 900);
+
 // --- Constants ---
 const GAME_DURATION = 90;
 const BASE_SPEED = 280;
+const AI_SPEED_MULT = 0.90; // AI bunnies 10% slower
 const DASH_MULTIPLIER = 3.5;
 const DASH_DURATION = 0.15;
 const DASH_COOLDOWN = 3;
@@ -34,8 +56,13 @@ const EGG_RADIUS = 12;
 const ARENA_PADDING = 30;
 const SPAWN_INTERVAL_START = 1.5;
 const SPAWN_INTERVAL_END = 0.6;
-const STEAL_COUNT_MIN = 1;
-const STEAL_COUNT_MAX = 2;
+const POOP_MAX = 10;
+const POOP_RELOAD_TIME = 10; // seconds to reload all poops
+const POOP_SLOW_DURATION = 2.5;
+const POOP_SLOW_FACTOR = 0.4;
+const POOP_RADIUS = 10;
+const NUM_AI = 3;
+const GRASS_SPAWN_CHANCE = 0.12; // chance a spawn is grass instead of egg
 
 // Egg types with weights and properties
 const EGG_TYPES = {
@@ -46,7 +73,7 @@ const EGG_TYPES = {
 };
 
 // --- Game State ---
-let gameState = 'START'; // START, PLAYING, GAME_OVER
+let gameState = 'START';
 let gameTimer = GAME_DURATION;
 let spawnTimer = 0;
 let shakeTimer = 0;
@@ -63,12 +90,86 @@ window.addEventListener('keydown', e => {
     startGame();
     e.preventDefault();
   }
-  // Prevent scrolling with arrow keys / space
   if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Enter'].includes(e.code)) {
     e.preventDefault();
   }
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// --- Touch Input State ---
+let touchJoystick = { active: false, dx: 0, dy: 0, id: null };
+let touchPoop = false;
+let touchDash = false;
+
+function setupTouchControls() {
+  if (!isMobile) return;
+  document.getElementById('touch-controls').style.display = 'block';
+
+  const joyZone = document.getElementById('joystick-zone');
+  const joyBase = document.getElementById('joystick-base');
+  const joyStick = document.getElementById('joystick-stick');
+
+  const baseCenterX = 80;  // center of joystick-base within zone
+  const baseCenterY = 80;
+  const maxDist = 45;
+
+  joyZone.addEventListener('touchstart', e => {
+    e.preventDefault();
+    const t = e.changedTouches[0];
+    touchJoystick.active = true;
+    touchJoystick.id = t.identifier;
+    if (gameState === 'START') startGame();
+  }, { passive: false });
+
+  joyZone.addEventListener('touchmove', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      if (t.identifier === touchJoystick.id) {
+        const rect = joyBase.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        let dx = t.clientX - cx;
+        let dy = t.clientY - cy;
+        const dist = Math.hypot(dx, dy);
+        if (dist > maxDist) { dx = dx / dist * maxDist; dy = dy / dist * maxDist; }
+        touchJoystick.dx = dx / maxDist;
+        touchJoystick.dy = dy / maxDist;
+        joyStick.style.left = (60 + dx) + 'px';
+        joyStick.style.bottom = (60 - dy) + 'px';
+      }
+    }
+  }, { passive: false });
+
+  const resetJoy = e => {
+    for (const t of e.changedTouches) {
+      if (t.identifier === touchJoystick.id) {
+        touchJoystick.active = false;
+        touchJoystick.dx = 0;
+        touchJoystick.dy = 0;
+        touchJoystick.id = null;
+        joyStick.style.left = '55px';
+        joyStick.style.bottom = '55px';
+      }
+    }
+  };
+  joyZone.addEventListener('touchend', resetJoy);
+  joyZone.addEventListener('touchcancel', resetJoy);
+
+  const btnPoop = document.getElementById('btn-poop');
+  btnPoop.addEventListener('touchstart', e => { e.preventDefault(); touchPoop = true; btnPoop.classList.add('touch-active'); if (gameState === 'START') startGame(); }, { passive: false });
+  btnPoop.addEventListener('touchend', e => { touchPoop = false; btnPoop.classList.remove('touch-active'); });
+  btnPoop.addEventListener('touchcancel', e => { touchPoop = false; btnPoop.classList.remove('touch-active'); });
+
+  const btnDash = document.getElementById('btn-dash');
+  btnDash.addEventListener('touchstart', e => { e.preventDefault(); touchDash = true; btnDash.classList.add('touch-active'); if (gameState === 'START') startGame(); }, { passive: false });
+  btnDash.addEventListener('touchend', e => { touchDash = false; btnDash.classList.remove('touch-active'); });
+  btnDash.addEventListener('touchcancel', e => { touchDash = false; btnDash.classList.remove('touch-active'); });
+
+  // Tap canvas to start
+  canvas.addEventListener('touchstart', e => {
+    if (gameState === 'START') { e.preventDefault(); startGame(); }
+  }, { passive: false });
+}
 
 // --- Audio System ---
 let audioCtx = null;
@@ -85,51 +186,40 @@ function playSound(type) {
     const now = audioCtx.currentTime;
     switch(type) {
       case 'collect':
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(880, now);
+        osc.type = 'sine'; osc.frequency.setValueAtTime(880, now);
         osc.frequency.exponentialRampToValueAtTime(1320, now + 0.08);
-        gain.gain.setValueAtTime(0.15, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
-        osc.start(now); osc.stop(now + 0.15);
-        break;
+        gain.gain.setValueAtTime(0.15, now); gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+        osc.start(now); osc.stop(now + 0.15); break;
       case 'golden':
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(660, now);
+        osc.type = 'sine'; osc.frequency.setValueAtTime(660, now);
         osc.frequency.exponentialRampToValueAtTime(1320, now + 0.1);
         osc.frequency.exponentialRampToValueAtTime(1760, now + 0.2);
-        gain.gain.setValueAtTime(0.2, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
-        osc.start(now); osc.stop(now + 0.3);
-        break;
-      case 'steal':
-        osc.type = 'square';
-        osc.frequency.setValueAtTime(150, now);
-        osc.frequency.exponentialRampToValueAtTime(80, now + 0.2);
-        gain.gain.setValueAtTime(0.15, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
-        osc.start(now); osc.stop(now + 0.25);
-        break;
+        gain.gain.setValueAtTime(0.2, now); gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+        osc.start(now); osc.stop(now + 0.3); break;
+      case 'poop':
+        osc.type = 'triangle'; osc.frequency.setValueAtTime(120, now);
+        osc.frequency.exponentialRampToValueAtTime(60, now + 0.15);
+        gain.gain.setValueAtTime(0.12, now); gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+        osc.start(now); osc.stop(now + 0.2); break;
       case 'rotten':
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(200, now);
+        osc.type = 'sawtooth'; osc.frequency.setValueAtTime(200, now);
         osc.frequency.exponentialRampToValueAtTime(80, now + 0.3);
-        gain.gain.setValueAtTime(0.12, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
-        osc.start(now); osc.stop(now + 0.35);
-        break;
+        gain.gain.setValueAtTime(0.12, now); gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+        osc.start(now); osc.stop(now + 0.35); break;
+      case 'grass':
+        osc.type = 'sine'; osc.frequency.setValueAtTime(440, now);
+        osc.frequency.exponentialRampToValueAtTime(880, now + 0.15);
+        gain.gain.setValueAtTime(0.1, now); gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+        osc.start(now); osc.stop(now + 0.2); break;
       case 'fanfare':
         [0, 0.15, 0.3, 0.5].forEach((delay, i) => {
-          const o = audioCtx.createOscillator();
-          const g = audioCtx.createGain();
-          o.connect(g); g.connect(audioCtx.destination);
-          o.type = 'sine';
-          const freqs = [523, 659, 784, 1047];
-          o.frequency.setValueAtTime(freqs[i], now + delay);
+          const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+          o.connect(g); g.connect(audioCtx.destination); o.type = 'sine';
+          o.frequency.setValueAtTime([523,659,784,1047][i], now + delay);
           g.gain.setValueAtTime(0.15, now + delay);
-          g.gain.exponentialRampToValueAtTime(0.001, now + delay + (i === 3 ? 0.5 : 0.2));
-          o.start(now + delay); o.stop(now + delay + (i === 3 ? 0.5 : 0.2));
-        });
-        break;
+          g.gain.exponentialRampToValueAtTime(0.001, now + delay + (i===3?0.5:0.2));
+          o.start(now + delay); o.stop(now + delay + (i===3?0.5:0.2));
+        }); break;
     }
   } catch(e) {}
 }
@@ -140,156 +230,200 @@ function spawnParticles(x, y, color, count = 8) {
   for (let i = 0; i < count; i++) {
     const angle = (Math.PI * 2 / count) * i + Math.random() * 0.5;
     const speed = 120 + Math.random() * 180;
-    particles.push({
-      x, y,
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed,
-      radius: 3 + Math.random() * 3,
-      color,
-      life: 0.4 + Math.random() * 0.3,
-      maxLife: 0.4 + Math.random() * 0.3
-    });
+    particles.push({ x, y, vx: Math.cos(angle)*speed, vy: Math.sin(angle)*speed, radius: 3+Math.random()*3, color, life: 0.4+Math.random()*0.3, maxLife: 0.4+Math.random()*0.3 });
   }
 }
 function updateParticles(dt) {
   for (let i = particles.length - 1; i >= 0; i--) {
-    const p = particles[i];
-    p.x += p.vx * dt;
-    p.y += p.vy * dt;
-    p.vx *= 0.96;
-    p.vy *= 0.96;
-    p.life -= dt;
+    const p = particles[i]; p.x += p.vx*dt; p.y += p.vy*dt; p.vx *= 0.96; p.vy *= 0.96; p.life -= dt;
     if (p.life <= 0) particles.splice(i, 1);
   }
 }
 function drawParticles() {
   for (const p of particles) {
     const alpha = Math.max(0, p.life / p.maxLife);
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = p.color;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.radius * alpha, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.globalAlpha = alpha; ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.radius*alpha, 0, Math.PI*2); ctx.fill();
   }
   ctx.globalAlpha = 1;
 }
 
+// --- Poop ---
+class Poop {
+  constructor(x, y) {
+    this.x = x; this.y = y;
+    this.radius = POOP_RADIUS;
+    this.life = 12; // seconds until despawn
+    this.maxLife = 12;
+  }
+  update(dt) { this.life -= dt; }
+  draw(time) {
+    const alpha = Math.min(1, this.life / 3); // fade out last 3 sec
+    ctx.globalAlpha = alpha;
+    // Brown splat
+    ctx.fillStyle = '#6B3A2A';
+    ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#8B5E3C';
+    ctx.beginPath(); ctx.arc(this.x-2, this.y-2, this.radius*0.6, 0, Math.PI*2); ctx.fill();
+    // Stink lines
+    ctx.strokeStyle = 'rgba(107,58,42,0.5)';
+    ctx.lineWidth = 1.5;
+    for (let i = 0; i < 3; i++) {
+      const sx = -4 + i * 4;
+      const waveOff = Math.sin(time * 3 + i * 2) * 2;
+      ctx.beginPath();
+      ctx.moveTo(this.x + sx, this.y - this.radius - 1);
+      ctx.quadraticCurveTo(this.x + sx + waveOff, this.y - this.radius - 6, this.x + sx, this.y - this.radius - 11);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+// --- Grass Patch ---
+class GrassPatch {
+  constructor(x, y) {
+    this.x = x; this.y = y;
+    this.radius = 14;
+    this.spawnScale = 0;
+    this.bobOffset = Math.random() * Math.PI * 2;
+    this.collected = false;
+  }
+  update(dt) {
+    if (this.spawnScale < 1) this.spawnScale = Math.min(1, this.spawnScale + dt * 4);
+  }
+  draw(time) {
+    const scale = this.spawnScale;
+    const r = this.radius * scale;
+    if (r <= 0) return;
+    const bob = Math.sin(time * 2 + this.bobOffset) * 2;
+    ctx.save();
+    ctx.translate(this.x, this.y + bob);
+    // Draw grass blades
+    const bladeCount = 7;
+    for (let i = 0; i < bladeCount; i++) {
+      const angle = (i / bladeCount) * Math.PI * 2;
+      const bx = Math.cos(angle) * r * 0.4;
+      const by = Math.sin(angle) * r * 0.3;
+      const sway = Math.sin(time * 3 + i) * 2;
+      ctx.strokeStyle = i % 2 === 0 ? '#4CAF50' : '#66BB6A';
+      ctx.lineWidth = 2.5;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(bx, by + 4);
+      ctx.quadraticCurveTo(bx + sway, by - r * 0.5, bx + sway * 0.5, by - r * 0.9);
+      ctx.stroke();
+    }
+    // Center dot
+    ctx.fillStyle = '#388E3C';
+    ctx.beginPath(); ctx.arc(0, 2, 4, 0, Math.PI*2); ctx.fill();
+    // Sparkle
+    const sparkle = Math.sin(time * 5 + this.bobOffset) * 0.5 + 0.5;
+    ctx.fillStyle = `rgba(255,255,255,${sparkle * 0.6})`;
+    ctx.beginPath(); ctx.arc(-2, -r*0.3, 2, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+}
+
 // --- Player ---
 class Player {
-  constructor(id, color, earColor, controls) {
-    this.id = id;
-    this.color = color;
-    this.earColor = earColor;
-    this.controls = controls; // { up, down, left, right, dash }
-    this.x = 0;
-    this.y = 0;
-    this.vx = 0;
-    this.vy = 0;
-    this.facingX = id === 1 ? 1 : -1;
-    this.facingY = 0;
+  constructor(id, color, earColor) {
+    this.id = id; this.color = color; this.earColor = earColor;
+    this.x = 0; this.y = 0; this.vx = 0; this.vy = 0;
+    this.facingX = 1; this.facingY = 0;
     this.score = 0;
     this.eggs = { milk: 0, dark: 0, golden: 0 };
-    this.dashCooldown = 0;
-    this.isDashing = false;
-    this.dashTimer = 0;
-    this.freezeTimer = 0;
-    this.speedBoostTimer = 0;
+    this.dashCooldown = 0; this.isDashing = false; this.dashTimer = 0;
+    this.freezeTimer = 0; this.speedBoostTimer = 0; this.slowTimer = 0;
     this.dashTrail = [];
+    this.poopCount = POOP_MAX;
+    this.poopReloadTimer = 0;
+    this.isHuman = false;
   }
 
   reset(x, y) {
-    this.x = x;
-    this.y = y;
-    this.vx = 0;
-    this.vy = 0;
-    this.score = 0;
-    this.eggs = { milk: 0, dark: 0, golden: 0 };
-    this.dashCooldown = 0;
-    this.isDashing = false;
-    this.dashTimer = 0;
-    this.freezeTimer = 0;
-    this.speedBoostTimer = 0;
-    this.dashTrail = [];
+    this.x = x; this.y = y; this.vx = 0; this.vy = 0;
+    this.score = 0; this.eggs = { milk: 0, dark: 0, golden: 0 };
+    this.dashCooldown = 0; this.isDashing = false; this.dashTimer = 0;
+    this.freezeTimer = 0; this.speedBoostTimer = 0; this.slowTimer = 0;
+    this.dashTrail = []; this.poopCount = POOP_MAX; this.poopReloadTimer = 0;
   }
 
-  get totalEggs() {
-    return this.eggs.milk + this.eggs.dark + this.eggs.golden;
-  }
+  get totalEggs() { return this.eggs.milk + this.eggs.dark + this.eggs.golden; }
 
   update(dt) {
-    // Timers
     if (this.dashCooldown > 0) this.dashCooldown -= dt;
     if (this.freezeTimer > 0) this.freezeTimer -= dt;
     if (this.speedBoostTimer > 0) this.speedBoostTimer -= dt;
-    if (this.dashTimer > 0) {
-      this.dashTimer -= dt;
-      if (this.dashTimer <= 0) this.isDashing = false;
-    }
+    if (this.slowTimer > 0) this.slowTimer -= dt;
+    if (this.dashTimer > 0) { this.dashTimer -= dt; if (this.dashTimer <= 0) this.isDashing = false; }
 
-    // Frozen — can't move
-    if (this.freezeTimer > 0) {
-      this.vx = 0;
-      this.vy = 0;
-      return;
-    }
-
-    // Movement input
-    let mx = 0, my = 0;
-    if (keys[this.controls.left])  mx -= 1;
-    if (keys[this.controls.right]) mx += 1;
-    if (keys[this.controls.up])    my -= 1;
-    if (keys[this.controls.down])  my += 1;
-
-    // Normalize diagonal
-    if (mx !== 0 && my !== 0) {
-      mx *= 0.7071;
-      my *= 0.7071;
-    }
-
-    // Update facing direction
-    if (mx !== 0 || my !== 0) {
-      this.facingX = mx;
-      this.facingY = my;
-    }
-
-    // Speed calculation
-    let speed = BASE_SPEED;
-    if (this.speedBoostTimer > 0) speed *= (1 + SPEED_BOOST_AMOUNT);
-    if (this.isDashing) speed *= DASH_MULTIPLIER;
-
-    this.vx = mx * speed;
-    this.vy = my * speed;
-
-    // Dash input
-    if (keys[this.controls.dash] && this.dashCooldown <= 0 && !this.isDashing) {
-      this.isDashing = true;
-      this.dashTimer = DASH_DURATION;
-      this.dashCooldown = DASH_COOLDOWN;
-      // If not moving, dash in facing direction
-      if (mx === 0 && my === 0) {
-        this.vx = this.facingX * speed * DASH_MULTIPLIER;
-        this.vy = this.facingY * speed * DASH_MULTIPLIER;
+    // Poop reload timer
+    if (this.poopCount < POOP_MAX && this.poopReloadTimer > 0) {
+      this.poopReloadTimer -= dt;
+      if (this.poopReloadTimer <= 0) {
+        this.poopCount = POOP_MAX;
       }
     }
 
-    // Apply movement
-    this.x += this.vx * dt;
-    this.y += this.vy * dt;
+    if (this.freezeTimer > 0) { this.vx = 0; this.vy = 0; return; }
+
+    let mx = 0, my = 0;
+    if (this.isHuman) {
+      // Keyboard
+      if (keys['ArrowLeft'])  mx -= 1;
+      if (keys['ArrowRight']) mx += 1;
+      if (keys['ArrowUp'])    my -= 1;
+      if (keys['ArrowDown'])  my += 1;
+      // Touch joystick
+      if (touchJoystick.active) {
+        const deadzone = 0.15;
+        if (Math.abs(touchJoystick.dx) > deadzone || Math.abs(touchJoystick.dy) > deadzone) {
+          mx = touchJoystick.dx; my = touchJoystick.dy;
+        }
+      }
+    }
+
+    if (mx !== 0 && my !== 0) {
+      const len = Math.hypot(mx, my);
+      mx /= len; my /= len;
+    }
+    if (mx !== 0 || my !== 0) { this.facingX = mx; this.facingY = my; }
+
+    let speed = BASE_SPEED;
+    if (!this.isHuman) speed *= AI_SPEED_MULT;
+    if (this.speedBoostTimer > 0) speed *= (1 + SPEED_BOOST_AMOUNT);
+    if (this.slowTimer > 0) speed *= POOP_SLOW_FACTOR;
+    if (this.isDashing) speed *= DASH_MULTIPLIER;
+
+    this.vx = mx * speed; this.vy = my * speed;
+
+    // Dash input (human)
+    if (this.isHuman) {
+      const dashInput = keys['Enter'] || touchDash;
+      if (dashInput && this.dashCooldown <= 0 && !this.isDashing) {
+        this.isDashing = true; this.dashTimer = DASH_DURATION; this.dashCooldown = DASH_COOLDOWN;
+        if (mx === 0 && my === 0) {
+          this.vx = this.facingX * speed * DASH_MULTIPLIER;
+          this.vy = this.facingY * speed * DASH_MULTIPLIER;
+        }
+      }
+    }
+
+    this.x += this.vx * dt; this.y += this.vy * dt;
 
     // Arena bounds
     const minX = ARENA_PADDING + PLAYER_RADIUS;
     const maxX = canvas.width - ARENA_PADDING - PLAYER_RADIUS;
-    const minY = ARENA_PADDING + PLAYER_RADIUS + 50; // leave room for HUD
+    const hudH = isMobile ? 80 : 50;
+    const minY = ARENA_PADDING + PLAYER_RADIUS + hudH;
     const maxY = canvas.height - ARENA_PADDING - PLAYER_RADIUS;
     if (this.x < minX) { this.x = minX; this.vx = 0; }
     if (this.x > maxX) { this.x = maxX; this.vx = 0; }
     if (this.y < minY) { this.y = minY; this.vy = 0; }
     if (this.y > maxY) { this.y = maxY; this.vy = 0; }
 
-    // Dash trail
-    if (this.isDashing) {
-      this.dashTrail.push({ x: this.x, y: this.y, life: 0.2 });
-    }
+    if (this.isDashing) this.dashTrail.push({ x: this.x, y: this.y, life: 0.2 });
     for (let i = this.dashTrail.length - 1; i >= 0; i--) {
       this.dashTrail[i].life -= dt;
       if (this.dashTrail[i].life <= 0) this.dashTrail.splice(i, 1);
@@ -297,105 +431,166 @@ class Player {
   }
 
   draw() {
-    // Dash trail
     for (const t of this.dashTrail) {
-      const alpha = t.life / 0.2 * 0.3;
-      ctx.globalAlpha = alpha;
-      ctx.fillStyle = this.color;
-      ctx.beginPath();
-      ctx.arc(t.x, t.y, PLAYER_RADIUS, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.globalAlpha = t.life / 0.2 * 0.3; ctx.fillStyle = this.color;
+      ctx.beginPath(); ctx.arc(t.x, t.y, PLAYER_RADIUS, 0, Math.PI*2); ctx.fill();
     }
     ctx.globalAlpha = 1;
-
     const r = PLAYER_RADIUS;
 
-    // Speed boost glow
     if (this.speedBoostTimer > 0) {
-      const glow = ctx.createRadialGradient(this.x, this.y, r, this.x, this.y, r * 2);
-      glow.addColorStop(0, 'rgba(255, 215, 0, 0.3)');
-      glow.addColorStop(1, 'rgba(255, 215, 0, 0)');
-      ctx.fillStyle = glow;
-      ctx.beginPath();
-      ctx.arc(this.x, this.y, r * 2, 0, Math.PI * 2);
-      ctx.fill();
+      const glow = ctx.createRadialGradient(this.x, this.y, r, this.x, this.y, r*2);
+      glow.addColorStop(0, 'rgba(255,215,0,0.3)'); glow.addColorStop(1, 'rgba(255,215,0,0)');
+      ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(this.x, this.y, r*2, 0, Math.PI*2); ctx.fill();
     }
 
-    // Freeze tint
-    const bodyColor = this.freezeTimer > 0 ? '#66BB6A' : this.color;
-
-    // Body
-    ctx.fillStyle = bodyColor;
-    ctx.beginPath();
-    ctx.arc(this.x, this.y, r, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    const bodyColor = this.freezeTimer > 0 ? '#66BB6A' : (this.slowTimer > 0 ? '#A0522D' : this.color);
+    ctx.fillStyle = bodyColor; ctx.beginPath(); ctx.arc(this.x, this.y, r, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 2; ctx.stroke();
 
     // Bunny ears
-    const earLen = r * 1.4;
-    const earW = r * 0.35;
-    const earSpread = 0.35;
+    const earLen = r * 1.4, earW = r * 0.35, earSpread = 0.35;
     for (let side = -1; side <= 1; side += 2) {
-      ctx.save();
-      ctx.translate(this.x, this.y);
-      const baseAngle = Math.atan2(this.facingY, this.facingX) - Math.PI / 2;
-      ctx.rotate(baseAngle + side * earSpread);
-      // Outer ear
-      ctx.fillStyle = bodyColor;
-      ctx.beginPath();
-      ctx.ellipse(0, -r - earLen / 2, earW, earLen / 2, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-      // Inner ear
-      ctx.fillStyle = this.earColor;
-      ctx.beginPath();
-      ctx.ellipse(0, -r - earLen / 2, earW * 0.55, earLen * 0.35, 0, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.save(); ctx.translate(this.x, this.y);
+      ctx.rotate(Math.atan2(this.facingY, this.facingX) - Math.PI/2 + side * earSpread);
+      ctx.fillStyle = bodyColor; ctx.beginPath();
+      ctx.ellipse(0, -r - earLen/2, earW, earLen/2, 0, 0, Math.PI*2); ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.fillStyle = this.earColor; ctx.beginPath();
+      ctx.ellipse(0, -r - earLen/2, earW*0.55, earLen*0.35, 0, 0, Math.PI*2); ctx.fill();
       ctx.restore();
     }
 
     // Eyes
-    const eyeAngle = Math.atan2(this.facingY, this.facingX);
-    const eyeDist = r * 0.45;
-    const eyePerp = Math.PI / 2;
+    const eyeAngle = Math.atan2(this.facingY, this.facingX), eyeDist = r * 0.45;
     for (let side = -1; side <= 1; side += 2) {
-      const ex = this.x + Math.cos(eyeAngle) * eyeDist + Math.cos(eyeAngle + eyePerp * side) * (r * 0.3);
-      const ey = this.y + Math.sin(eyeAngle) * eyeDist + Math.sin(eyeAngle + eyePerp * side) * (r * 0.3);
-      // White
-      ctx.fillStyle = '#fff';
-      ctx.beginPath();
-      ctx.arc(ex, ey, 5, 0, Math.PI * 2);
-      ctx.fill();
-      // Pupil
-      ctx.fillStyle = '#222';
-      ctx.beginPath();
-      ctx.arc(ex + Math.cos(eyeAngle) * 1.5, ey + Math.sin(eyeAngle) * 1.5, 2.5, 0, Math.PI * 2);
-      ctx.fill();
+      const ex = this.x + Math.cos(eyeAngle)*eyeDist + Math.cos(eyeAngle + Math.PI/2*side)*(r*0.3);
+      const ey = this.y + Math.sin(eyeAngle)*eyeDist + Math.sin(eyeAngle + Math.PI/2*side)*(r*0.3);
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(ex, ey, 5, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(ex + Math.cos(eyeAngle)*1.5, ey + Math.sin(eyeAngle)*1.5, 2.5, 0, Math.PI*2); ctx.fill();
     }
 
-    // Freeze indicator
     if (this.freezeTimer > 0) {
-      ctx.strokeStyle = '#4CAF50';
-      ctx.lineWidth = 3;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      ctx.arc(this.x, this.y, r + 6, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.setLineDash([]);
+      ctx.strokeStyle = '#4CAF50'; ctx.lineWidth = 3; ctx.setLineDash([4,4]);
+      ctx.beginPath(); ctx.arc(this.x, this.y, r+6, 0, Math.PI*2); ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (this.slowTimer > 0) {
+      ctx.strokeStyle = '#8B5E3C'; ctx.lineWidth = 2; ctx.setLineDash([3,3]);
+      ctx.beginPath(); ctx.arc(this.x, this.y, r+5, 0, Math.PI*2); ctx.stroke(); ctx.setLineDash([]);
     }
 
-    // Dash ready indicator (small dot under player)
     if (this.dashCooldown <= 0 && !this.isDashing) {
-      ctx.fillStyle = '#fff';
-      ctx.globalAlpha = 0.6 + Math.sin(Date.now() * 0.008) * 0.4;
-      ctx.beginPath();
-      ctx.arc(this.x, this.y + r + 8, 3, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#fff'; ctx.globalAlpha = 0.6 + Math.sin(Date.now()*0.008)*0.4;
+      ctx.beginPath(); ctx.arc(this.x, this.y + r + 8, 3, 0, Math.PI*2); ctx.fill(); ctx.globalAlpha = 1;
+    }
+  }
+}
+
+// --- AI Controller ---
+class AIController {
+  constructor(player) {
+    this.player = player;
+    this.targetEgg = null;
+    this.retargetTimer = 0;
+    this.dashDecisionTimer = 0;
+    this.wanderAngle = Math.random() * Math.PI * 2;
+  }
+
+  update(dt, eggs, grassPatches, poops, humanPlayer) {
+    const p = this.player;
+    if (p.freezeTimer > 0) return;
+
+    this.retargetTimer -= dt;
+    this.dashDecisionTimer -= dt;
+
+    // Pick a target egg/grass
+    if (this.retargetTimer <= 0 || !this.targetEgg || this.targetEgg.collected) {
+      this.retargetTimer = 0.4 + Math.random() * 0.3;
+      this.targetEgg = null;
+      let bestScore = -Infinity;
+
+      // Consider eggs
+      for (const egg of eggs) {
+        if (egg.collected) continue;
+        const d = Math.hypot(egg.x - p.x, egg.y - p.y);
+        // Avoid rotten eggs
+        let score = egg.props.points * 10 - d;
+        if (egg.type === 'rotten') score -= 500;
+        if (egg.type === 'golden') score += 200;
+        if (score > bestScore) { bestScore = score; this.targetEgg = egg; }
+      }
+
+      // Consider grass patches (good for poop reload)
+      for (const g of grassPatches) {
+        if (g.collected) continue;
+        if (p.poopCount >= POOP_MAX) continue; // Don't need grass
+        const d = Math.hypot(g.x - p.x, g.y - p.y);
+        const score = 150 - d;
+        if (score > bestScore) { bestScore = score; this.targetEgg = g; }
+      }
+    }
+
+    let mx = 0, my = 0;
+
+    // Check if near a poop — dodge it
+    let dodging = false;
+    for (const poop of poops) {
+      const d = Math.hypot(poop.x - p.x, poop.y - p.y);
+      if (d < 50) {
+        // Move away from poop
+        mx = (p.x - poop.x) / d;
+        my = (p.y - poop.y) / d;
+        dodging = true;
+        break;
+      }
+    }
+
+    if (!dodging && this.targetEgg) {
+      const dx = this.targetEgg.x - p.x;
+      const dy = this.targetEgg.y - p.y;
+      const d = Math.hypot(dx, dy);
+      if (d > 5) { mx = dx / d; my = dy / d; }
+    } else if (!dodging) {
+      // Wander
+      this.wanderAngle += (Math.random() - 0.5) * 2 * dt;
+      mx = Math.cos(this.wanderAngle);
+      my = Math.sin(this.wanderAngle);
+    }
+
+    // Apply movement
+    p.facingX = mx; p.facingY = my;
+    let speed = BASE_SPEED * AI_SPEED_MULT;
+    if (p.speedBoostTimer > 0) speed *= (1 + SPEED_BOOST_AMOUNT);
+    if (p.slowTimer > 0) speed *= POOP_SLOW_FACTOR;
+    if (p.isDashing) speed *= DASH_MULTIPLIER;
+    p.vx = mx * speed; p.vy = my * speed;
+
+    // AI dash toward close eggs
+    if (this.dashDecisionTimer <= 0 && p.dashCooldown <= 0 && !p.isDashing && this.targetEgg) {
+      const d = Math.hypot(this.targetEgg.x - p.x, this.targetEgg.y - p.y);
+      if (d < 120 && d > 30 && Math.random() < 0.3) {
+        p.isDashing = true; p.dashTimer = DASH_DURATION; p.dashCooldown = DASH_COOLDOWN;
+        this.dashDecisionTimer = 1;
+      }
+    }
+
+    p.x += p.vx * dt; p.y += p.vy * dt;
+
+    // Arena bounds
+    const minX = ARENA_PADDING + PLAYER_RADIUS;
+    const maxX = canvas.width - ARENA_PADDING - PLAYER_RADIUS;
+    const hudH = isMobile ? 80 : 50;
+    const minY = ARENA_PADDING + PLAYER_RADIUS + hudH;
+    const maxY = canvas.height - ARENA_PADDING - PLAYER_RADIUS;
+    if (p.x < minX) { p.x = minX; p.vx = 0; this.wanderAngle = Math.random() * Math.PI * 2; }
+    if (p.x > maxX) { p.x = maxX; p.vx = 0; this.wanderAngle = Math.random() * Math.PI * 2; }
+    if (p.y < minY) { p.y = minY; p.vy = 0; this.wanderAngle = Math.random() * Math.PI * 2; }
+    if (p.y > maxY) { p.y = maxY; p.vy = 0; this.wanderAngle = Math.random() * Math.PI * 2; }
+
+    if (p.isDashing) p.dashTrail.push({ x: p.x, y: p.y, life: 0.2 });
+    for (let i = p.dashTrail.length - 1; i >= 0; i--) {
+      p.dashTrail[i].life -= dt;
+      if (p.dashTrail[i].life <= 0) p.dashTrail.splice(i, 1);
     }
   }
 }
@@ -403,140 +598,201 @@ class Player {
 // --- Egg ---
 class Egg {
   constructor(x, y, type) {
-    this.x = x;
-    this.y = y;
-    this.type = type;
-    this.props = EGG_TYPES[type];
-    this.radius = EGG_RADIUS;
-    this.spawnScale = 0;
-    this.bobOffset = Math.random() * Math.PI * 2;
-    this.collected = false;
+    this.x = x; this.y = y; this.type = type; this.props = EGG_TYPES[type];
+    this.radius = EGG_RADIUS; this.spawnScale = 0;
+    this.bobOffset = Math.random() * Math.PI * 2; this.collected = false;
   }
-
-  update(dt) {
-    if (this.spawnScale < 1) {
-      this.spawnScale = Math.min(1, this.spawnScale + dt * 4);
-    }
-  }
-
+  update(dt) { if (this.spawnScale < 1) this.spawnScale = Math.min(1, this.spawnScale + dt*4); }
   draw(time) {
-    const scale = this.spawnScale;
-    const r = this.radius * scale;
+    const scale = this.spawnScale, r = this.radius * scale;
     if (r <= 0) return;
-
-    const bob = Math.sin(time * 3 + this.bobOffset) * 2;
-
-    ctx.save();
-    ctx.translate(this.x, this.y + bob);
-
-    // Shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.15)';
-    ctx.beginPath();
-    ctx.ellipse(0, r + 2, r * 0.8, r * 0.25, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Egg shape (slightly oval)
-    const grad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.1, 0, 0, r);
-    grad.addColorStop(0, this.props.highlight);
-    grad.addColorStop(1, this.props.color);
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.ellipse(0, 0, r * 0.85, r, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Shine spot
-    ctx.fillStyle = 'rgba(255,255,255,0.4)';
-    ctx.beginPath();
-    ctx.ellipse(-r * 0.25, -r * 0.3, r * 0.2, r * 0.15, -0.3, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Golden sparkle
+    const bob = Math.sin(time*3 + this.bobOffset) * 2;
+    ctx.save(); ctx.translate(this.x, this.y + bob);
+    ctx.fillStyle = 'rgba(0,0,0,0.15)'; ctx.beginPath();
+    ctx.ellipse(0, r+2, r*0.8, r*0.25, 0, 0, Math.PI*2); ctx.fill();
+    const grad = ctx.createRadialGradient(-r*0.3, -r*0.3, r*0.1, 0, 0, r);
+    grad.addColorStop(0, this.props.highlight); grad.addColorStop(1, this.props.color);
+    ctx.fillStyle = grad; ctx.beginPath();
+    ctx.ellipse(0, 0, r*0.85, r, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.beginPath();
+    ctx.ellipse(-r*0.25, -r*0.3, r*0.2, r*0.15, -0.3, 0, Math.PI*2); ctx.fill();
     if (this.type === 'golden') {
-      const sparkle = Math.sin(time * 8 + this.bobOffset) * 0.5 + 0.5;
-      ctx.strokeStyle = `rgba(255, 215, 0, ${sparkle * 0.8})`;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(0, 0, r + 3 + sparkle * 3, 0, Math.PI * 2);
-      ctx.stroke();
+      const sparkle = Math.sin(time*8 + this.bobOffset) * 0.5 + 0.5;
+      ctx.strokeStyle = `rgba(255,215,0,${sparkle*0.8})`; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, 0, r+3+sparkle*3, 0, Math.PI*2); ctx.stroke();
     }
-
-    // Rotten stink lines
     if (this.type === 'rotten') {
-      ctx.strokeStyle = 'rgba(76, 175, 80, 0.4)';
-      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'rgba(76,175,80,0.4)'; ctx.lineWidth = 1.5;
       for (let i = 0; i < 3; i++) {
-        const sx = -6 + i * 6;
-        const waveOff = Math.sin(time * 4 + i * 2) * 3;
-        ctx.beginPath();
-        ctx.moveTo(sx, -r - 2);
-        ctx.quadraticCurveTo(sx + waveOff, -r - 8, sx, -r - 14);
-        ctx.stroke();
+        const sx = -6+i*6, waveOff = Math.sin(time*4+i*2)*3;
+        ctx.beginPath(); ctx.moveTo(sx, -r-2);
+        ctx.quadraticCurveTo(sx+waveOff, -r-8, sx, -r-14); ctx.stroke();
       }
     }
-
     ctx.restore();
   }
 }
 
+// --- LMNO Logo (Pixel Art, Embossed) ---
+// Based on the lowercase "lmno." wordmark — hand-pixelated
+// Each letter defined as a grid of 1s on a coordinate system
+function drawLMNOLogo(cx, cy, scale, alpha, time) {
+  // Pixel grid for "lmno." — each char is roughly 5-7 wide x 9 tall
+  // Arranged: l(5w) m(9w) n(7w) o(7w) .(3w) with 1px gap = total ~36w
+  const pixelSize = scale;
+  const p = (x, y) => {
+    // Emboss effect: shadow offset
+    const embossShift = 1;
+    // Dark shadow
+    ctx.fillStyle = `rgba(0,0,0,${alpha * 0.4})`;
+    ctx.fillRect(cx + (x+embossShift)*pixelSize, cy + (y+embossShift)*pixelSize, pixelSize, pixelSize);
+    // Highlight
+    ctx.fillStyle = `rgba(255,255,255,${alpha * 0.08})`;
+    ctx.fillRect(cx + (x-0.5)*pixelSize, cy + (y-0.5)*pixelSize, pixelSize, pixelSize);
+    // Main pixel
+    const flicker = 0.9 + Math.sin(time * 0.5 + x * 0.3 + y * 0.7) * 0.1;
+    ctx.fillStyle = `rgba(255,255,255,${alpha * 0.18 * flicker})`;
+    ctx.fillRect(cx + x*pixelSize, cy + y*pixelSize, pixelSize-1, pixelSize-1);
+  };
+
+  // "l" — simple vertical bar, 3 wide x 9 tall
+  const lx = 0;
+  for (let y = 0; y < 9; y++) { p(lx,y); p(lx+1,y); p(lx+2,y); }
+
+  // "m" — two humps, starts at x=5
+  const mx = 5;
+  // Left vertical
+  for (let y = 2; y < 9; y++) { p(mx,y); p(mx+1,y); }
+  // First hump
+  p(mx+2,2); p(mx+3,1); p(mx+4,1); p(mx+2,1);
+  p(mx+3,2);
+  for (let y = 2; y < 9; y++) { p(mx+4,y); p(mx+5,y); }
+  // Second hump
+  p(mx+6,2); p(mx+7,1); p(mx+8,1); p(mx+6,1);
+  p(mx+7,2);
+  for (let y = 2; y < 9; y++) { p(mx+8,y); p(mx+9,y); }
+
+  // "n" — single hump, starts at x=17
+  const nx = 17;
+  for (let y = 2; y < 9; y++) { p(nx,y); p(nx+1,y); }
+  p(nx+2,2); p(nx+3,1); p(nx+4,1); p(nx+2,1); p(nx+5,1);
+  p(nx+3,2); p(nx+5,2);
+  for (let y = 2; y < 9; y++) { p(nx+5,y); p(nx+6,y); }
+
+  // "o" — circle, starts at x=25
+  const ox = 25;
+  // Top row
+  p(ox+2,1); p(ox+3,1); p(ox+4,1);
+  // Second row
+  p(ox+1,2); p(ox+5,2);
+  // Sides
+  for (let y = 3; y < 7; y++) { p(ox,y); p(ox+1,y); p(ox+5,y); p(ox+6,y); }
+  // Second to bottom
+  p(ox+1,7); p(ox+5,7);
+  // Bottom
+  p(ox+2,8); p(ox+3,8); p(ox+4,8);
+
+  // Red dot "." at x=33
+  const dx = 33;
+  // Draw a small red circle (2x2 pixels)
+  const dotFlicker = 0.85 + Math.sin(time * 2) * 0.15;
+  ctx.fillStyle = `rgba(0,0,0,${alpha * 0.4})`;
+  ctx.fillRect(cx + (dx+1)*pixelSize, cy + 8*pixelSize, pixelSize*2, pixelSize*2);
+  ctx.fillStyle = `rgba(200,30,30,${alpha * 0.7 * dotFlicker})`;
+  ctx.fillRect(cx + dx*pixelSize, cy + 7*pixelSize, pixelSize*2, pixelSize*2);
+}
+
 // --- Game Objects ---
-let player1, player2, eggs;
+let humanPlayer, aiBunnies = [], aiControllers = [], eggs, poops, grassPatches;
+
+const AI_COLORS = [
+  { color: '#E74C3C', ear: '#FFB6C1' },
+  { color: '#F39C12', ear: '#FFE0B2' },
+  { color: '#9B59B6', ear: '#E1BEE7' },
+];
 
 function createPlayers() {
-  player1 = new Player(1, '#4A90D9', '#FFB6C1', {
-    up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', dash: 'Space'
-  });
-  player2 = new Player(2, '#E74C3C', '#FFB6C1', {
-    up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', dash: 'Enter'
-  });
+  humanPlayer = new Player(0, '#4A90D9', '#FFB6C1');
+  humanPlayer.isHuman = true;
+  aiBunnies = [];
+  aiControllers = [];
+  for (let i = 0; i < NUM_AI; i++) {
+    const ai = new Player(i+1, AI_COLORS[i].color, AI_COLORS[i].ear);
+    aiBunnies.push(ai);
+    aiControllers.push(new AIController(ai));
+  }
 }
 
 function resetGame() {
-  eggs = [];
+  eggs = []; poops = []; grassPatches = [];
   particles.length = 0;
-  gameTimer = GAME_DURATION;
-  spawnTimer = 0;
-  shakeTimer = 0;
-  flashAlpha = 0;
-  winner = null;
-  player1.reset(canvas.width * 0.25, canvas.height * 0.5);
-  player2.reset(canvas.width * 0.75, canvas.height * 0.5);
+  gameTimer = GAME_DURATION; spawnTimer = 0;
+  shakeTimer = 0; flashAlpha = 0; winner = null;
+  humanPlayer.reset(canvas.width * 0.5, canvas.height * 0.5);
+  for (let i = 0; i < aiBunnies.length; i++) {
+    const angle = (Math.PI * 2 / NUM_AI) * i + Math.PI / 4;
+    aiBunnies[i].reset(
+      canvas.width * 0.5 + Math.cos(angle) * 150,
+      canvas.height * 0.5 + Math.sin(angle) * 150
+    );
+  }
 }
 
-// --- Egg Spawning ---
+// --- Spawning ---
 function getRandomEggType() {
   const totalWeight = Object.values(EGG_TYPES).reduce((s, t) => s + t.weight, 0);
   let rand = Math.random() * totalWeight;
   for (const [type, props] of Object.entries(EGG_TYPES)) {
-    rand -= props.weight;
-    if (rand <= 0) return type;
+    rand -= props.weight; if (rand <= 0) return type;
   }
   return 'milk';
 }
 
 function spawnEgg() {
   const margin = ARENA_PADDING + EGG_RADIUS + 20;
-  const topMargin = ARENA_PADDING + 50 + EGG_RADIUS + 20;
+  const hudH = isMobile ? 80 : 50;
+  const topMargin = ARENA_PADDING + hudH + EGG_RADIUS + 20;
   const x = margin + Math.random() * (canvas.width - margin * 2);
   const y = topMargin + Math.random() * (canvas.height - topMargin - margin);
-  eggs.push(new Egg(x, y, getRandomEggType()));
+
+  // Chance to spawn grass instead
+  if (Math.random() < GRASS_SPAWN_CHANCE) {
+    grassPatches.push(new GrassPatch(x, y));
+  } else {
+    eggs.push(new Egg(x, y, getRandomEggType()));
+  }
+}
+
+// --- Poop laying ---
+let poopKeyWasDown = false;
+function handlePoopInput() {
+  const poopInput = keys['Space'] || touchPoop;
+  if (poopInput && !poopKeyWasDown && humanPlayer.poopCount > 0 && humanPlayer.freezeTimer <= 0) {
+    poops.push(new Poop(humanPlayer.x, humanPlayer.y));
+    humanPlayer.poopCount--;
+    if (humanPlayer.poopCount <= 0 && humanPlayer.poopReloadTimer <= 0) {
+      humanPlayer.poopReloadTimer = POOP_RELOAD_TIME;
+    }
+    playSound('poop');
+    spawnParticles(humanPlayer.x, humanPlayer.y, '#6B3A2A', 5);
+  }
+  poopKeyWasDown = poopInput;
 }
 
 // --- Collision ---
-function dist(a, b) {
-  return Math.hypot(a.x - b.x, a.y - b.y);
-}
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
 function checkCollisions() {
+  const allPlayers = [humanPlayer, ...aiBunnies];
+
   // Player ↔ Egg
-  for (const player of [player1, player2]) {
+  for (const player of allPlayers) {
     if (player.freezeTimer > 0) continue;
     for (let i = eggs.length - 1; i >= 0; i--) {
       const egg = eggs[i];
       if (egg.collected) continue;
       if (dist(player, egg) < PLAYER_RADIUS + egg.radius * egg.spawnScale) {
-        egg.collected = true;
-        eggs.splice(i, 1);
-
+        egg.collected = true; eggs.splice(i, 1);
         if (egg.type === 'rotten') {
           player.freezeTimer = FREEZE_DURATION;
           spawnParticles(egg.x, egg.y, '#4CAF50', 12);
@@ -545,7 +801,6 @@ function checkCollisions() {
           player.eggs[egg.type]++;
           player.score += egg.props.points;
           spawnParticles(egg.x, egg.y, egg.props.color, 8);
-
           if (egg.type === 'golden') {
             player.speedBoostTimer = SPEED_BOOST_DURATION;
             playSound('golden');
@@ -557,309 +812,245 @@ function checkCollisions() {
     }
   }
 
-  // Player ↔ Player (steal on dash)
-  if ((player1.isDashing || player2.isDashing) && dist(player1, player2) < PLAYER_RADIUS * 2) {
-    const attacker = player1.isDashing ? player1 : player2;
-    const victim = player2.isDashing && !player1.isDashing ? player1 : player2;
-    // If both dashing, P1 gets priority (arbitrary but consistent)
-    if (player1.isDashing && player2.isDashing) {
-      // Both cancel out — no steal
-      return;
+  // Player ↔ Grass
+  for (const player of allPlayers) {
+    if (player.freezeTimer > 0) continue;
+    for (let i = grassPatches.length - 1; i >= 0; i--) {
+      const g = grassPatches[i];
+      if (g.collected) continue;
+      if (dist(player, g) < PLAYER_RADIUS + g.radius * g.spawnScale) {
+        g.collected = true; grassPatches.splice(i, 1);
+        player.poopCount = POOP_MAX;
+        player.poopReloadTimer = 0;
+        spawnParticles(g.x, g.y, '#4CAF50', 10);
+        playSound('grass');
+      }
     }
+  }
 
-    const stealCount = Math.min(
-      STEAL_COUNT_MIN + Math.floor(Math.random() * (STEAL_COUNT_MAX - STEAL_COUNT_MIN + 1)),
-      victim.totalEggs
-    );
-
-    if (stealCount > 0) {
-      // Build pool of stealable eggs
-      const pool = [];
-      for (const [type, count] of Object.entries(victim.eggs)) {
-        for (let i = 0; i < count; i++) pool.push(type);
+  // Player ↔ Poop (AI bunnies only get slowed)
+  for (const ai of aiBunnies) {
+    if (ai.slowTimer > 0) continue;
+    for (const poop of poops) {
+      if (dist(ai, poop) < PLAYER_RADIUS + poop.radius) {
+        ai.slowTimer = POOP_SLOW_DURATION;
+        spawnParticles(ai.x, ai.y, '#6B3A2A', 6);
       }
-      // Shuffle and steal
-      for (let i = pool.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [pool[i], pool[j]] = [pool[j], pool[i]];
-      }
-      for (let i = 0; i < stealCount; i++) {
-        const type = pool[i];
-        victim.eggs[type]--;
-        victim.score -= EGG_TYPES[type].points;
-        attacker.eggs[type]++;
-        attacker.score += EGG_TYPES[type].points;
-      }
-
-      // Effects
-      shakeTimer = 0.2;
-      shakeIntensity = 6;
-      flashAlpha = 0.3;
-      spawnParticles(
-        (player1.x + player2.x) / 2,
-        (player1.y + player2.y) / 2,
-        '#fff', 15
-      );
-      playSound('steal');
     }
+  }
 
-    // Push players apart
-    const angle = Math.atan2(victim.y - attacker.y, victim.x - attacker.x);
-    victim.x += Math.cos(angle) * 40;
-    victim.y += Math.sin(angle) * 40;
-    attacker.isDashing = false;
-    attacker.dashTimer = 0;
+  // Clean up expired poops
+  for (let i = poops.length - 1; i >= 0; i--) {
+    if (poops[i].life <= 0) poops.splice(i, 1);
   }
 }
 
-// --- Drawing: Arena Background ---
+// --- Drawing ---
 function drawArena() {
-  // Background gradient
   const bg = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  bg.addColorStop(0, '#2D1B4E');
-  bg.addColorStop(1, '#1A0A2E');
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  bg.addColorStop(0, '#2D1B4E'); bg.addColorStop(1, '#1A0A2E');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // Arena floor
-  const floorGrad = ctx.createRadialGradient(
-    canvas.width / 2, canvas.height / 2, 50,
-    canvas.width / 2, canvas.height / 2, Math.max(canvas.width, canvas.height) * 0.6
-  );
-  floorGrad.addColorStop(0, '#3D2B5A');
-  floorGrad.addColorStop(1, '#251545');
+  const floorGrad = ctx.createRadialGradient(canvas.width/2, canvas.height/2, 50, canvas.width/2, canvas.height/2, Math.max(canvas.width, canvas.height)*0.6);
+  floorGrad.addColorStop(0, '#3D2B5A'); floorGrad.addColorStop(1, '#251545');
   ctx.fillStyle = floorGrad;
+  const ap = ARENA_PADDING, hudH = isMobile ? 80 : 50, top = ap + hudH;
+  ctx.beginPath(); ctx.roundRect(ap, top, canvas.width-ap*2, canvas.height-top-ap, 20); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.roundRect(ap, top, canvas.width-ap*2, canvas.height-top-ap, 20); ctx.stroke();
 
-  const ap = ARENA_PADDING;
-  const top = ap + 50;
-  const borderRadius = 20;
-  ctx.beginPath();
-  ctx.roundRect(ap, top, canvas.width - ap * 2, canvas.height - top - ap, borderRadius);
-  ctx.fill();
-
-  // Arena border
-  ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.roundRect(ap, top, canvas.width - ap * 2, canvas.height - top - ap, borderRadius);
-  ctx.stroke();
-
-  // Subtle grid pattern
-  ctx.strokeStyle = 'rgba(255,255,255,0.03)';
-  ctx.lineWidth = 1;
+  // Grid
+  ctx.strokeStyle = 'rgba(255,255,255,0.03)'; ctx.lineWidth = 1;
   const gridSize = 60;
-  for (let x = ap + gridSize; x < canvas.width - ap; x += gridSize) {
-    ctx.beginPath();
-    ctx.moveTo(x, top);
-    ctx.lineTo(x, canvas.height - ap);
-    ctx.stroke();
+  for (let x = ap+gridSize; x < canvas.width-ap; x += gridSize) {
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, canvas.height-ap); ctx.stroke();
   }
-  for (let y = top + gridSize; y < canvas.height - ap; y += gridSize) {
-    ctx.beginPath();
-    ctx.moveTo(ap, y);
-    ctx.lineTo(canvas.width - ap, y);
-    ctx.stroke();
+  for (let y = top+gridSize; y < canvas.height-ap; y += gridSize) {
+    ctx.beginPath(); ctx.moveTo(ap, y); ctx.lineTo(canvas.width-ap, y); ctx.stroke();
   }
+
+  // LMNO watermark on arena floor
+  const logoScale = Math.min(canvas.width / 300, canvas.height / 200) * 4;
+  const logoW = 36 * logoScale;
+  const logoH = 9 * logoScale;
+  drawLMNOLogo(canvas.width/2 - logoW/2, canvas.height/2 - logoH/2, logoScale, 1, Date.now()/1000);
 }
 
-// --- Drawing: HUD ---
 function drawHUD(time) {
-  // Player 1 score — top left
-  drawPlayerHUD(player1, 20, 8, 'left', 'P1 — Blue Bunny', time);
-  // Player 2 score — top right
-  drawPlayerHUD(player2, canvas.width - 20, 8, 'right', 'P2 — Red Bunny', time);
+  const hudH = isMobile ? 80 : 50;
+  // Your score — top left
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.font = `bold ${isMobile ? 14 : 13}px monospace`;
+  ctx.fillStyle = humanPlayer.color;
+  ctx.fillText('YOU — Blue Bunny', 20, 8);
+  ctx.font = `bold ${isMobile ? 22 : 24}px monospace`;
+  ctx.fillStyle = '#fff';
+  ctx.fillText(`${humanPlayer.score} pts`, 20, isMobile ? 26 : 22);
+  ctx.font = `${isMobile ? 10 : 11}px monospace`;
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.fillText(`${humanPlayer.eggs.milk}m  ${humanPlayer.eggs.dark}d  ${humanPlayer.eggs.golden}g`, 20, isMobile ? 50 : 46);
+
+  // Poop counter
+  const poopY = isMobile ? 64 : 58;
+  ctx.font = `${isMobile ? 10 : 9}px monospace`;
+  ctx.fillStyle = humanPlayer.poopCount > 0 ? '#8B5E3C' : 'rgba(255,255,255,0.3)';
+  let poopText = '💩 ' + humanPlayer.poopCount;
+  if (humanPlayer.poopCount <= 0 && humanPlayer.poopReloadTimer > 0) {
+    poopText += ` (${Math.ceil(humanPlayer.poopReloadTimer)}s)`;
+  }
+  ctx.fillText(poopText, 20, poopY);
+
+  // Dash cooldown
+  const dashY = poopY + (isMobile ? 14 : 12);
+  const dashReady = humanPlayer.dashCooldown <= 0;
+  ctx.fillStyle = dashReady ? humanPlayer.color : 'rgba(255,255,255,0.3)';
+  ctx.fillText(dashReady ? '⚡ DASH READY' : `⚡ ${Math.ceil(humanPlayer.dashCooldown)}s`, 20, dashY);
+
+  // AI scores — top right
+  ctx.textAlign = 'right'; ctx.textBaseline = 'top';
+  for (let i = 0; i < aiBunnies.length; i++) {
+    const ai = aiBunnies[i];
+    const yOff = i * (isMobile ? 22 : 20);
+    ctx.font = `bold ${isMobile ? 11 : 11}px monospace`;
+    ctx.fillStyle = ai.color;
+    ctx.fillText(`Bot ${i+1}: `, canvas.width - 60, 8 + yOff);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(`${ai.score} pts`, canvas.width - 20, 8 + yOff);
+  }
 
   // Timer — center
-  const timerY = 35;
   const remaining = Math.max(0, Math.ceil(gameTimer));
-  const minutes = Math.floor(remaining / 60);
-  const seconds = remaining % 60;
-  const timerText = `${minutes}:${seconds.toString().padStart(2, '0')}`;
-
-  let timerColor = '#fff';
-  let timerSize = 32;
-  if (gameTimer <= 10) {
-    timerColor = '#FF4444';
-    if (gameTimer <= 5) {
-      timerSize = 32 + Math.sin(time * 10) * 4;
-    }
-  }
-
+  const mins = Math.floor(remaining / 60);
+  const secs = remaining % 60;
+  let timerColor = '#fff', timerSize = isMobile ? 26 : 32;
+  if (gameTimer <= 10) { timerColor = '#FF4444'; if (gameTimer <= 5) timerSize += Math.sin(time*10)*4; }
   ctx.font = `bold ${Math.round(timerSize)}px monospace`;
-  ctx.fillStyle = timerColor;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(timerText, canvas.width / 2, timerY);
+  ctx.fillStyle = timerColor; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(`${mins}:${secs.toString().padStart(2,'0')}`, canvas.width/2, isMobile ? 40 : 35);
 }
 
-function drawPlayerHUD(player, x, y, align, label, time) {
-  ctx.textAlign = align;
-  ctx.textBaseline = 'top';
-
-  // Label
-  ctx.font = 'bold 13px monospace';
-  ctx.fillStyle = player.color;
-  ctx.fillText(label, x, y);
-
-  // Score
-  ctx.font = 'bold 24px monospace';
-  ctx.fillStyle = '#fff';
-  const scoreText = `${player.score} pts`;
-  ctx.fillText(scoreText, x, y + 16);
-
-  // Egg breakdown
-  ctx.font = '11px monospace';
-  ctx.fillStyle = 'rgba(255,255,255,0.6)';
-  const breakdown = `${player.eggs.milk}m  ${player.eggs.dark}d  ${player.eggs.golden}g`;
-  ctx.fillText(breakdown, x, y + 40);
-
-  // Dash cooldown bar
-  const barW = 80;
-  const barH = 4;
-  const barX = align === 'left' ? x : x - barW;
-  const barY = y + 54;
-  const cooldownPct = Math.max(0, player.dashCooldown / DASH_COOLDOWN);
-
-  ctx.fillStyle = 'rgba(255,255,255,0.15)';
-  ctx.fillRect(barX, barY, barW, barH);
-
-  if (cooldownPct > 0) {
-    ctx.fillStyle = 'rgba(255,255,255,0.3)';
-    ctx.fillRect(barX, barY, barW * (1 - cooldownPct), barH);
-  } else {
-    ctx.fillStyle = player.color;
-    ctx.fillRect(barX, barY, barW, barH);
-  }
-
-  // Dash label
-  ctx.font = '9px monospace';
-  ctx.fillStyle = cooldownPct <= 0 ? player.color : 'rgba(255,255,255,0.3)';
-  ctx.fillText(cooldownPct <= 0 ? 'DASH READY' : 'DASH', barX + (align === 'left' ? 0 : barW), barY + barH + 10);
-}
-
-// --- Drawing: Screens ---
 function drawStartScreen(time) {
   drawArena();
+  ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // Overlay
-  ctx.fillStyle = 'rgba(0,0,0,0.65)';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const cx = canvas.width / 2, cy = canvas.height / 2;
+  const isSm = canvas.width < 600;
 
-  const cx = canvas.width / 2;
-  const cy = canvas.height / 2;
+  // LMNO Logo — large, embossed
+  const logoScale = isSm ? 4 : 6;
+  const logoW = 36 * logoScale;
+  const logoH = 9 * logoScale;
+  drawLMNOLogo(cx - logoW/2, cy - (isSm ? 180 : 220) - logoH/2, logoScale, 1, time);
+
+  // "presents" text
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = `${isSm ? 10 : 12}px monospace`;
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.fillText('presents', cx, cy - (isSm ? 145 : 170));
 
   // Title
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.font = 'bold 52px monospace';
+  ctx.font = `bold ${isSm ? 28 : 52}px monospace`;
   ctx.fillStyle = '#FFD700';
-  ctx.fillText('CHOCOLATE EGG', cx, cy - 120);
+  ctx.fillText('CHOCOLATE EGG', cx, cy - (isSm ? 110 : 120));
   ctx.fillStyle = '#fff';
-  ctx.fillText('BATTLE', cx, cy - 65);
+  ctx.fillText('BATTLE', cx, cy - (isSm ? 80 : 65));
 
-  // Subtitle
-  ctx.font = '16px monospace';
+  ctx.font = `${isSm ? 11 : 16}px monospace`;
   ctx.fillStyle = 'rgba(255,255,255,0.6)';
-  ctx.fillText('2-Player Local Multiplayer', cx, cy - 30);
+  ctx.fillText('1 Player vs AI Bunnies', cx, cy - (isSm ? 60 : 30));
 
   // Controls
-  ctx.font = 'bold 14px monospace';
-  ctx.fillStyle = '#4A90D9';
-  ctx.fillText('PLAYER 1 (Blue Bunny)', cx - 160, cy + 20);
-  ctx.fillStyle = '#E74C3C';
-  ctx.fillText('PLAYER 2 (Red Bunny)', cx + 160, cy + 20);
+  if (!isSm) {
+    ctx.font = 'bold 14px monospace';
+    ctx.fillStyle = '#4A90D9';
+    ctx.fillText('CONTROLS', cx, cy + 15);
 
-  ctx.font = '12px monospace';
-  ctx.fillStyle = 'rgba(255,255,255,0.7)';
-  ctx.fillText('WASD to move', cx - 160, cy + 45);
-  ctx.fillText('SPACE to dash/steal', cx - 160, cy + 62);
-  ctx.fillText('Arrow Keys to move', cx + 160, cy + 45);
-  ctx.fillText('ENTER to dash/steal', cx + 160, cy + 62);
+    ctx.font = '12px monospace';
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillText('Arrow Keys — Move', cx, cy + 40);
+    ctx.fillText('ENTER — Dash', cx, cy + 57);
+    ctx.fillText('SPACE — Drop Poop (slows enemies!)', cx, cy + 74);
 
-  // Egg legend
-  ctx.font = '12px monospace';
-  const legendY = cy + 100;
-  const types = [
-    ['Milk (1pt)', EGG_TYPES.milk.color],
-    ['Dark (3pt)', EGG_TYPES.dark.color],
-    ['Golden (5pt + speed)', EGG_TYPES.golden.color],
-    ['Rotten (freeze!)', EGG_TYPES.rotten.color]
-  ];
-  const legendSpacing = 160;
-  const legendStartX = cx - (types.length - 1) * legendSpacing / 2;
-  types.forEach(([label, color], i) => {
-    const lx = legendStartX + i * legendSpacing;
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(lx - 40, legendY, 6, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    ctx.fillText(label, lx + 10, legendY + 4);
-  });
+    // Egg legend
+    ctx.font = '12px monospace';
+    const legendY = cy + 110;
+    const types = [
+      ['Milk (1pt)', EGG_TYPES.milk.color],
+      ['Dark (3pt)', EGG_TYPES.dark.color],
+      ['Golden (5pt+⚡)', EGG_TYPES.golden.color],
+      ['Rotten (freeze!)', EGG_TYPES.rotten.color]
+    ];
+    const legendSpacing = 155;
+    const legendStartX = cx - (types.length - 1) * legendSpacing / 2;
+    types.forEach(([label, color], i) => {
+      const lx = legendStartX + i * legendSpacing;
+      ctx.fillStyle = color; ctx.beginPath(); ctx.arc(lx - 40, legendY, 6, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.fillText(label, lx + 10, legendY + 4);
+    });
+
+    // Extra legend items
+    ctx.font = '11px monospace';
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.fillText('🌿 Grass patches reload your poops!', cx, cy + 140);
+  } else {
+    // Mobile compact
+    ctx.font = '11px monospace';
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillText('Joystick to move • DASH button • 💩 button', cx, cy + 5);
+    ctx.fillText('Collect eggs, avoid rotten ones!', cx, cy + 22);
+    ctx.fillText('🌿 Eat grass to reload poops', cx, cy + 39);
+  }
 
   // Prompt
-  const blink = Math.sin(time * 4) > 0;
-  if (blink) {
-    ctx.font = 'bold 18px monospace';
+  if (Math.sin(time * 4) > 0) {
+    ctx.font = `bold ${isSm ? 14 : 18}px monospace`;
     ctx.fillStyle = '#FFD700';
-    ctx.fillText('Press any key to start!', cx, cy + 155);
+    ctx.fillText(isMobile ? 'Tap to start!' : 'Press any key to start!', cx, cy + (isSm ? 70 : 175));
   }
 }
 
 function drawGameOverScreen(time) {
-  // Dim overlay
-  ctx.fillStyle = 'rgba(0,0,0,0.7)';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const cx = canvas.width / 2, cy = canvas.height / 2;
+  const isSm = canvas.width < 600;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
 
-  const cx = canvas.width / 2;
-  const cy = canvas.height / 2;
+  // Determine winner
+  const allPlayers = [humanPlayer, ...aiBunnies];
+  allPlayers.sort((a, b) => b.score - a.score);
+  const topScore = allPlayers[0].score;
+  const isPlayerWinner = humanPlayer.score === topScore;
 
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-
-  // Winner announcement
-  ctx.font = 'bold 48px monospace';
-  if (winner === 'tie') {
+  ctx.font = `bold ${isSm ? 30 : 48}px monospace`;
+  if (isPlayerWinner) {
     ctx.fillStyle = '#FFD700';
-    ctx.fillText("IT'S A TIE!", cx, cy - 100);
+    ctx.fillText('YOU WIN! 🏆', cx, cy - (isSm ? 80 : 100));
   } else {
-    const w = winner === 1 ? player1 : player2;
-    ctx.fillStyle = w.color;
-    ctx.fillText(`PLAYER ${winner} WINS!`, cx, cy - 100);
+    ctx.fillStyle = '#E74C3C';
+    ctx.fillText('YOU LOST!', cx, cy - (isSm ? 80 : 100));
   }
 
-  // Scores side by side
-  const colOffset = 180;
-  for (const [player, offsetX] of [[player1, -colOffset], [player2, colOffset]]) {
-    const px = cx + offsetX;
-    ctx.font = 'bold 16px monospace';
-    ctx.fillStyle = player.color;
-    ctx.fillText(player === player1 ? 'P1 — Blue Bunny' : 'P2 — Red Bunny', px, cy - 40);
+  // Scores
+  ctx.font = `bold ${isSm ? 20 : 28}px monospace`;
+  ctx.fillStyle = '#fff';
+  ctx.fillText(`Your Score: ${humanPlayer.score}`, cx, cy - (isSm ? 40 : 40));
 
-    ctx.font = 'bold 36px monospace';
-    ctx.fillStyle = '#fff';
-    ctx.fillText(`${player.score}`, px, cy + 5);
-    ctx.font = '14px monospace';
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
-    ctx.fillText('points', px, cy + 30);
+  ctx.font = `${isSm ? 12 : 14}px monospace`;
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.fillText(`Milk: ${humanPlayer.eggs.milk}  Dark: ${humanPlayer.eggs.dark}  Gold: ${humanPlayer.eggs.golden}  Total: ${humanPlayer.totalEggs}`, cx, cy - (isSm ? 15 : 10));
 
-    ctx.font = '13px monospace';
-    ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    ctx.fillText(`Milk: ${player.eggs.milk}  Dark: ${player.eggs.dark}  Gold: ${player.eggs.golden}`, px, cy + 55);
-    ctx.fillText(`Total eggs: ${player.totalEggs}`, px, cy + 75);
+  // AI scores
+  ctx.font = `${isSm ? 11 : 13}px monospace`;
+  for (let i = 0; i < aiBunnies.length; i++) {
+    const ai = aiBunnies[i];
+    ctx.fillStyle = ai.color;
+    ctx.fillText(`Bot ${i+1}: ${ai.score} pts (${ai.totalEggs} eggs)`, cx, cy + (isSm ? 15 : 25) + i * (isSm ? 18 : 22));
   }
 
-  // VS
-  ctx.font = 'bold 20px monospace';
-  ctx.fillStyle = 'rgba(255,255,255,0.3)';
-  ctx.fillText('VS', cx, cy + 5);
-
-  // Play again
-  const blink = Math.sin(time * 4) > 0;
-  if (blink) {
-    ctx.font = 'bold 18px monospace';
+  if (Math.sin(time * 4) > 0) {
+    ctx.font = `bold ${isSm ? 14 : 18}px monospace`;
     ctx.fillStyle = '#FFD700';
-    ctx.fillText('Press any key to play again!', cx, cy + 130);
+    ctx.fillText(isMobile ? 'Tap to play again!' : 'Press any key to play again!', cx, cy + (isSm ? 80 : 120));
   }
 }
 
@@ -872,20 +1063,13 @@ function startGame() {
 
 function endGame() {
   gameState = 'GAME_OVER';
-  if (player1.score > player2.score) winner = 1;
-  else if (player2.score > player1.score) winner = 2;
-  else winner = 'tie';
   playSound('fanfare');
-
-  // Reset keys to prevent instant restart
   for (const k in keys) keys[k] = false;
-  // Delay restart ability
+  touchPoop = false; touchDash = false;
   setTimeout(() => {
-    const restartHandler = (e) => {
-      startGame();
-      window.removeEventListener('keydown', restartHandler);
-    };
+    const restartHandler = () => { startGame(); window.removeEventListener('keydown', restartHandler); canvas.removeEventListener('touchstart', restartHandler); };
     window.addEventListener('keydown', restartHandler);
+    canvas.addEventListener('touchstart', restartHandler, { once: true });
   }, 1000);
 }
 
@@ -899,89 +1083,58 @@ resize();
 
 // --- Main Loop ---
 createPlayers();
+setupTouchControls();
 
 function gameLoop(timestamp) {
-  const dt = Math.min((timestamp - lastTime) / 1000, 0.05); // cap at 50ms
+  const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
   lastTime = timestamp;
-
   const time = timestamp / 1000;
 
   if (gameState === 'PLAYING') {
-    // Update timer
     gameTimer -= dt;
-    if (gameTimer <= 0) {
-      gameTimer = 0;
-      endGame();
-    }
+    if (gameTimer <= 0) { gameTimer = 0; endGame(); }
 
-    // Spawn eggs
     const progress = 1 - (gameTimer / GAME_DURATION);
     const spawnInterval = SPAWN_INTERVAL_START + (SPAWN_INTERVAL_END - SPAWN_INTERVAL_START) * progress;
     spawnTimer -= dt;
-    if (spawnTimer <= 0) {
-      spawnEgg();
-      spawnTimer = spawnInterval;
+    if (spawnTimer <= 0) { spawnEgg(); spawnTimer = spawnInterval; }
+
+    humanPlayer.update(dt);
+    handlePoopInput();
+    for (let i = 0; i < aiBunnies.length; i++) {
+      aiBunnies[i].update(dt); // update timers
+      aiControllers[i].update(dt, eggs, grassPatches, poops, humanPlayer);
     }
-
-    // Update players
-    player1.update(dt);
-    player2.update(dt);
-
-    // Update eggs
     for (const egg of eggs) egg.update(dt);
-
-    // Collisions
+    for (const g of grassPatches) g.update(dt);
+    for (const poop of poops) poop.update(dt);
     checkCollisions();
-
-    // Particles
     updateParticles(dt);
-
-    // Screen effects
     if (shakeTimer > 0) shakeTimer -= dt;
     if (flashAlpha > 0) flashAlpha -= dt * 2;
   }
 
-  // --- Draw ---
   ctx.save();
-
-  // Camera shake
   if (shakeTimer > 0) {
-    const sx = (Math.random() - 0.5) * shakeIntensity * 2;
-    const sy = (Math.random() - 0.5) * shakeIntensity * 2;
-    ctx.translate(sx, sy);
+    ctx.translate((Math.random()-0.5)*shakeIntensity*2, (Math.random()-0.5)*shakeIntensity*2);
   }
 
   if (gameState === 'START') {
     drawStartScreen(time);
   } else {
     drawArena();
-
-    // Draw eggs
+    for (const poop of poops) poop.draw(time);
+    for (const g of grassPatches) g.draw(time);
     for (const egg of eggs) egg.draw(time);
-
-    // Draw particles
     drawParticles();
-
-    // Draw players
-    player1.draw();
-    player2.draw();
-
-    // HUD
+    humanPlayer.draw();
+    for (const ai of aiBunnies) ai.draw();
     drawHUD(time);
-
-    // Flash effect
-    if (flashAlpha > 0) {
-      ctx.fillStyle = `rgba(255,255,255,${flashAlpha})`;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-    }
-
-    if (gameState === 'GAME_OVER') {
-      drawGameOverScreen(time);
-    }
+    if (flashAlpha > 0) { ctx.fillStyle = `rgba(255,255,255,${flashAlpha})`; ctx.fillRect(0,0,canvas.width,canvas.height); }
+    if (gameState === 'GAME_OVER') drawGameOverScreen(time);
   }
 
   ctx.restore();
-
   requestAnimationFrame(gameLoop);
 }
 
