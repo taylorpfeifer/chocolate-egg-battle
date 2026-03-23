@@ -13,7 +13,7 @@
   .touch-zone { pointer-events: auto; position: absolute; }
   #joystick-zone { left: 10px; bottom: 10px; width: 160px; height: 160px; }
   #btn-poop { right: 20px; bottom: 80px; width: 80px; height: 80px; border-radius: 50%; background: rgba(139,90,43,0.5); border: 3px solid rgba(139,90,43,0.8); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 28px; font-family: monospace; font-weight: bold; }
-  #btn-dash { right: 110px; bottom: 30px; width: 70px; height: 70px; border-radius: 50%; background: rgba(74,144,217,0.5); border: 3px solid rgba(74,144,217,0.8); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 11px; font-family: monospace; font-weight: bold; text-align: center; }
+  #btn-dash { right: 110px; bottom: 30px; width: 70px; height: 70px; border-radius: 50%; background: rgba(74,144,217,0.5); border: 3px solid rgba(74,144,217,0.8); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 10px; font-family: monospace; font-weight: bold; text-align: center; }
   .touch-active { transform: scale(0.9); opacity: 0.7; }
   #joystick-base { width: 120px; height: 120px; border-radius: 50%; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2); position: absolute; left: 20px; bottom: 20px; }
   #joystick-stick { width: 50px; height: 50px; border-radius: 50%; background: rgba(255,255,255,0.35); border: 2px solid rgba(255,255,255,0.5); position: absolute; left: 55px; bottom: 55px; transform: translate(-50%, 50%); transition: none; }
@@ -28,7 +28,7 @@
     </div>
   </div>
   <div id="btn-poop" class="touch-zone">💩</div>
-  <div id="btn-dash" class="touch-zone">DASH</div>
+  <div id="btn-dash" class="touch-zone">ZORCH</div>
 </div>
 <script>
 // ============================================================
@@ -904,7 +904,7 @@ function drawHUD(time) {
   const dashY = poopY + (isMobile ? 14 : 12);
   const dashReady = humanPlayer.dashCooldown <= 0;
   ctx.fillStyle = dashReady ? humanPlayer.color : 'rgba(255,255,255,0.3)';
-  ctx.fillText(dashReady ? '⚡ DASH READY' : `⚡ ${Math.ceil(humanPlayer.dashCooldown)}s`, 20, dashY);
+  ctx.fillText(dashReady ? '⚡ ZORCH READY' : `⚡ ${Math.ceil(humanPlayer.dashCooldown)}s`, 20, dashY);
 
   // AI scores — top right
   ctx.textAlign = 'right'; ctx.textBaseline = 'top';
@@ -996,7 +996,7 @@ function drawStartScreen(time) {
     // Mobile compact
     ctx.font = '11px monospace';
     ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    ctx.fillText('Joystick to move • DASH button • 💩 button', cx, cy + 5);
+    ctx.fillText('Joystick to move • ZORCH button • 💩 button', cx, cy + 5);
     ctx.fillText('Collect eggs, avoid rotten ones!', cx, cy + 22);
     ctx.fillText('🌿 Eat grass to reload poops', cx, cy + 39);
   }
